@@ -1,0 +1,354 @@
+# ════════════════════════════════════════════════════════════════
+# Student Management System – Azure DevOps CI/CD Pipeline
+#
+# Pipeline Stages:
+#   1. install      – Install all dependencies
+#   2. lint         – Lint frontend & backend code
+#   3. build        – Build the React application
+#   4. docker-build – Build Docker image (backend + frontend)
+#   5. push-acr     – Push image to Azure Container Registry
+#   6. deploy       – Deploy to Azure App Service
+#   7. verify       – Verify deployment via /health endpoint
+# ════════════════════════════════════════════════════════════════
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    exclude:
+      - "*.md"
+      - "docs/**"
+
+pr:
+  branches:
+    include:
+      - main
+
+# ── Pipeline-level variables ─────────────────────────────────
+variables:
+  # Azure Container Registry name (without .azurecr.io)
+  acrName: "$(ACR_NAME)"
+
+  # Image repository names in ACR
+  imageRepository.backend:  "sms-backend"
+  imageRepository.frontend: "sms-frontend"
+
+  # Docker service connection name (configured in Azure DevOps)
+  dockerRegistryServiceConnection: "$(DOCKER_REGISTRY_SERVICE_CONNECTION)"
+
+  # Azure subscription service connection name
+  azureSubscription: "$(AZURE_SUBSCRIPTION)"
+
+  # Azure App Service name
+  webAppName: "$(WEB_APP_NAME)"
+
+  # Full ACR hostname
+  containerRegistry: "$(ACR_NAME).azurecr.io"
+
+  # Image tag – use the build number for traceability
+  imageTag: "$(Build.BuildNumber)"
+
+  # Node.js version
+  nodeVersion: "20.x"
+
+  # Working directories
+  backendDir:  "$(System.DefaultWorkingDirectory)/backend"
+  frontendDir: "$(System.DefaultWorkingDirectory)/frontend"
+
+# ════════════════════════════════════════════════════════════════
+# STAGE 1 – Install Dependencies
+# ════════════════════════════════════════════════════════════════
+stages:
+  - stage: Install
+    displayName: "Stage 1 – Install Dependencies"
+    jobs:
+      - job: InstallDependencies
+        displayName: "Install Backend & Frontend Dependencies"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: NodeTool@0
+            displayName: "Use Node.js $(nodeVersion)"
+            inputs:
+              versionSpec: $(nodeVersion)
+
+          - script: |
+              echo "══════════════════════════════════════"
+              echo "  Installing backend dependencies"
+              echo "══════════════════════════════════════"
+              npm ci
+            workingDirectory: $(backendDir)
+            displayName: "npm ci – Backend"
+
+          - script: |
+              echo "══════════════════════════════════════"
+              echo "  Installing frontend dependencies"
+              echo "══════════════════════════════════════"
+              npm ci
+            workingDirectory: $(frontendDir)
+            displayName: "npm ci – Frontend"
+
+          # Cache node_modules for downstream stages
+          - task: Cache@2
+            displayName: "Cache backend node_modules"
+            inputs:
+              key: 'npm | "$(Agent.OS)" | $(backendDir)/package-lock.json'
+              restoreKeys: 'npm | "$(Agent.OS)"'
+              path: "$(backendDir)/node_modules"
+
+          - task: Cache@2
+            displayName: "Cache frontend node_modules"
+            inputs:
+              key: 'npm | "$(Agent.OS)" | $(frontendDir)/package-lock.json'
+              restoreKeys: 'npm | "$(Agent.OS)"'
+              path: "$(frontendDir)/node_modules"
+
+# ════════════════════════════════════════════════════════════════
+# STAGE 2 – Lint
+# ════════════════════════════════════════════════════════════════
+  - stage: Lint
+    displayName: "Stage 2 – Lint Code"
+    dependsOn: Install
+    jobs:
+      - job: LintBackend
+        displayName: "ESLint – Backend"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(nodeVersion)
+
+          - task: Cache@2
+            inputs:
+              key: 'npm | "$(Agent.OS)" | $(backendDir)/package-lock.json'
+              path: "$(backendDir)/node_modules"
+
+          - script: npm run lint
+            workingDirectory: $(backendDir)
+            displayName: "Run ESLint on backend"
+
+      - job: LintFrontend
+        displayName: "ESLint – Frontend"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(nodeVersion)
+
+          - task: Cache@2
+            inputs:
+              key: 'npm | "$(Agent.OS)" | $(frontendDir)/package-lock.json'
+              path: "$(frontendDir)/node_modules"
+
+          - script: npm run lint
+            workingDirectory: $(frontendDir)
+            displayName: "Run ESLint on frontend"
+
+# ════════════════════════════════════════════════════════════════
+# STAGE 3 – Build React Application
+# ════════════════════════════════════════════════════════════════
+  - stage: Build
+    displayName: "Stage 3 – Build React Application"
+    dependsOn: Lint
+    jobs:
+      - job: BuildFrontend
+        displayName: "Vite Production Build"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(nodeVersion)
+
+          - task: Cache@2
+            inputs:
+              key: 'npm | "$(Agent.OS)" | $(frontendDir)/package-lock.json'
+              path: "$(frontendDir)/node_modules"
+
+          - script: npm run build
+            workingDirectory: $(frontendDir)
+            displayName: "vite build"
+            env:
+              VITE_API_URL: "/api"
+
+          # Publish the dist/ folder as a pipeline artifact for the Docker stage
+          - task: PublishBuildArtifacts@1
+            displayName: "Publish frontend build artifact"
+            inputs:
+              pathToPublish: "$(frontendDir)/dist"
+              artifactName:  "frontend-dist"
+              publishLocation: Container
+
+# ════════════════════════════════════════════════════════════════
+# STAGE 4 – Build Docker Images
+# ════════════════════════════════════════════════════════════════
+  - stage: DockerBuild
+    displayName: "Stage 4 – Build Docker Images"
+    dependsOn: Build
+    jobs:
+      - job: BuildDockerImages
+        displayName: "Build Backend & Frontend Docker Images"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: DownloadBuildArtifacts@0
+            displayName: "Download frontend artifact"
+            inputs:
+              buildType:     current
+              artifactName:  frontend-dist
+              downloadPath:  "$(frontendDir)/dist"
+
+          # Build backend image
+          - task: Docker@2
+            displayName: "docker build – backend"
+            inputs:
+              command:             build
+              dockerfile:          "$(backendDir)/Dockerfile"
+              buildContext:        "$(backendDir)"
+              repository:          "$(imageRepository.backend)"
+              tags:                |
+                $(imageTag)
+                latest
+
+          # Build frontend image
+          - task: Docker@2
+            displayName: "docker build – frontend"
+            inputs:
+              command:             build
+              dockerfile:          "$(frontendDir)/Dockerfile"
+              buildContext:        "$(frontendDir)"
+              repository:          "$(imageRepository.frontend)"
+              tags:                |
+                $(imageTag)
+                latest
+              arguments:           "--build-arg VITE_API_URL=/api"
+
+          - script: |
+              echo "Built images:"
+              docker images | grep -E "sms-backend|sms-frontend"
+            displayName: "List built images"
+
+# ════════════════════════════════════════════════════════════════
+# STAGE 5 – Push to Azure Container Registry
+# ════════════════════════════════════════════════════════════════
+  - stage: PushACR
+    displayName: "Stage 5 – Push to Azure Container Registry"
+    dependsOn: DockerBuild
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: PushImages
+        displayName: "Push Images to ACR"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          # Login to ACR
+          - task: Docker@2
+            displayName: "Login to ACR"
+            inputs:
+              command:             login
+              containerRegistry:   $(dockerRegistryServiceConnection)
+
+          # Build & push backend
+          - task: Docker@2
+            displayName: "Build & Push backend image"
+            inputs:
+              command:             buildAndPush
+              dockerfile:          "$(backendDir)/Dockerfile"
+              buildContext:        "$(backendDir)"
+              containerRegistry:   $(dockerRegistryServiceConnection)
+              repository:          "$(imageRepository.backend)"
+              tags:                |
+                $(imageTag)
+                latest
+
+          # Build & push frontend
+          - task: Docker@2
+            displayName: "Build & Push frontend image"
+            inputs:
+              command:             buildAndPush
+              dockerfile:          "$(frontendDir)/Dockerfile"
+              buildContext:        "$(frontendDir)"
+              containerRegistry:   $(dockerRegistryServiceConnection)
+              repository:          "$(imageRepository.frontend)"
+              tags:                |
+                $(imageTag)
+                latest
+              arguments:           "--build-arg VITE_API_URL=/api"
+
+          - script: |
+              echo "✅ Images pushed to ACR: $(containerRegistry)"
+              echo "   Backend:  $(containerRegistry)/$(imageRepository.backend):$(imageTag)"
+              echo "   Frontend: $(containerRegistry)/$(imageRepository.frontend):$(imageTag)"
+            displayName: "Log pushed image URIs"
+
+# ════════════════════════════════════════════════════════════════
+# STAGE 6 – Deploy to Azure App Service
+# ════════════════════════════════════════════════════════════════
+  - stage: Deploy
+    displayName: "Stage 6 – Deploy to Azure App Service"
+    dependsOn: PushACR
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployToAppService
+        displayName: "Deploy Backend to Azure App Service"
+        pool:
+          vmImage: ubuntu-latest
+        environment: "production"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureWebAppContainer@1
+                  displayName: "Deploy backend container to App Service"
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    appName:           $(webAppName)
+                    containers:        "$(containerRegistry)/$(imageRepository.backend):$(imageTag)"
+                    appSettings:       |
+                      -NODE_ENV production
+                      -PORT 3000
+                      -LOG_LEVEL info
+                      -CORS_ORIGIN https://$(webAppName).azurewebsites.net
+
+                - script: |
+                    echo "🚀 Deployment triggered for $(webAppName)"
+                    echo "   Image: $(containerRegistry)/$(imageRepository.backend):$(imageTag)"
+                  displayName: "Log deployment info"
+
+# ════════════════════════════════════════════════════════════════
+# STAGE 7 – Deployment Verification
+# ════════════════════════════════════════════════════════════════
+  - stage: Verify
+    displayName: "Stage 7 – Deployment Verification"
+    dependsOn: Deploy
+    condition: succeeded()
+    jobs:
+      - job: HealthCheck
+        displayName: "Verify /health endpoint"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - script: |
+              chmod +x $(System.DefaultWorkingDirectory)/scripts/verify-deployment.sh
+              $(System.DefaultWorkingDirectory)/scripts/verify-deployment.sh \
+                "https://$(webAppName).azurewebsites.net/health"
+            displayName: "Run deployment verification script"
+            env:
+              WEB_APP_NAME: $(webAppName)
+
+          - script: |
+              echo ""
+              echo "═══════════════════════════════════════════════"
+              echo "  ✅ DEPLOYMENT SUCCESSFUL"
+              echo "═══════════════════════════════════════════════"
+              echo "  App URL  : https://$(webAppName).azurewebsites.net"
+              echo "  Health   : https://$(webAppName).azurewebsites.net/health"
+              echo "  API      : https://$(webAppName).azurewebsites.net/api/students"
+              echo "  Build    : $(Build.BuildNumber)"
+              echo "  Image    : $(containerRegistry)/$(imageRepository.backend):$(imageTag)"
+              echo "═══════════════════════════════════════════════"
+            displayName: "Deployment summary"

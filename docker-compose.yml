@@ -1,0 +1,64 @@
+# ════════════════════════════════════════════════════════════════
+# Student Management System – Docker Compose
+# Starts both frontend (Nginx/React) and backend (Node/Express)
+# ════════════════════════════════════════════════════════════════
+
+version: "3.9"
+
+services:
+  # ── Backend API ──────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sms-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV:    production
+      PORT:        3000
+      CORS_ORIGIN: http://localhost:5173
+      LOG_LEVEL:   info
+    ports:
+      - "3000:3000"
+    volumes:
+      # Persist SQLite database between restarts
+      - sqlite_data:/app/database/data
+      - backend_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout:  10s
+      retries:  3
+      start_period: 20s
+    networks:
+      - sms_net
+
+  # ── Frontend ─────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Tell Vite where the API lives at build time
+        VITE_API_URL: /api
+    container_name: sms-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - sms_net
+
+# ── Volumes ────────────────────────────────────────────────────
+volumes:
+  sqlite_data:
+    driver: local
+  backend_logs:
+    driver: local
+
+# ── Networks ───────────────────────────────────────────────────
+networks:
+  sms_net:
+    driver: bridge
