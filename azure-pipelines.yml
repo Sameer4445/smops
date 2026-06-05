@@ -29,23 +29,23 @@ pr:
 # ── Pipeline-level variables ─────────────────────────────────
 variables:
   # Azure Container Registry name (without .azurecr.io)
-  acrName: "$(ACR_NAME)"
+  acrName: "smops2026"
 
   # Image repository names in ACR
   imageRepository.backend:  "sms-backend"
   imageRepository.frontend: "sms-frontend"
 
   # Docker service connection name (configured in Azure DevOps)
-  dockerRegistryServiceConnection: "$(DOCKER_REGISTRY_SERVICE_CONNECTION)"
+  dockerRegistryServiceConnection: "azure-subscription-connection"
 
   # Azure subscription service connection name
-  azureSubscription: "$(AZURE_SUBSCRIPTION)"
+  azureSubscription: "azure-subscription-connection"
 
   # Azure App Service name
-  webAppName: "$(WEB_APP_NAME)"
+  webAppName: "smops-app-2026"
 
   # Full ACR hostname
-  containerRegistry: "$(ACR_NAME).azurecr.io"
+  containerRegistry: "smops2026.azurecr.io"
 
   # Image tag – use the build number for traceability
   imageTag: "$(Build.BuildNumber)"
