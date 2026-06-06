@@ -308,11 +308,7 @@ stages:
                     azureSubscription: $(azureSubscription)
                     appName:           $(webAppName)
                     containers:        "$(containerRegistry)/$(imageRepository.backend):$(imageTag)"
-                    appSettings:       |
-                      -NODE_ENV production
-                      -PORT 3000
-                      -LOG_LEVEL info
-                      -CORS_ORIGIN https://$(webAppName).azurewebsites.net
+                    appSettings:       '-NODE_ENV production -PORT 3000 -LOG_LEVEL info -CORS_ORIGIN https://$(webAppName).azurewebsites.net'
 
                 - script: |
                     echo "🚀 Deployment triggered for $(webAppName)"
