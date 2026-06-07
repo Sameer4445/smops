@@ -7,6 +7,7 @@ module.exports = {
   parserOptions: {
     ecmaVersion: "latest",
   },
+  ignorePatterns: ["public/", "node_modules/"],
   rules: {
     "no-unused-vars": ["warn", { argsIgnorePattern: "^_" }],
     "no-console": "off",

@@ -1,13 +1,19 @@
 # ════════════════════════════════════════════════════════════════
 # Student Management System – Azure DevOps CI/CD Pipeline
+# Single-container deployment (React frontend + Express backend)
+#
+# Final image serves:
+#   /          → React SPA
+#   /api/*     → Express REST API
+#   /health    → Health check
 #
 # Pipeline Stages:
-#   1. install      – Install all dependencies
+#   1. install      – Install backend & frontend dependencies
 #   2. lint         – Lint frontend & backend code
-#   3. build        – Build the React application
-#   4. docker-build – Build Docker image (backend + frontend)
+#   3. build        – Build React app (Vite)
+#   4. docker-build – Build single combined Docker image
 #   5. push-acr     – Push image to Azure Container Registry
-#   6. deploy       – Deploy to Azure App Service
+#   6. deploy       – Deploy container to Azure App Service
 #   7. verify       – Verify deployment via /health endpoint
 # ════════════════════════════════════════════════════════════════
 
@@ -26,28 +32,25 @@ pr:
     include:
       - main
 
-# ── Pipeline-level variables ─────────────────────────────────
+# ── Pipeline-level variables ──────────────────────────────────
 variables:
   # Azure Container Registry name (without .azurecr.io)
-  acrName: smops2026
+  acrName: "smops2026"
 
-  # Image repository names in ACR
-  imageRepository.backend:  "sms-backend"
-  imageRepository.frontend: "sms-frontend"
+  # Single combined image repository name
+  imageRepository: "sms-app"
 
-  # Docker service connection name (configured in Azure DevOps)
-  dockerRegistryServiceConnection: "acr-service-connection"
-
-  # Azure subscription service connection name
+  # Service connections configured in Azure DevOps
+  dockerRegistryServiceConnection: "azure-subscription-connection"
   azureSubscription: "azure-subscription-connection"
 
   # Azure App Service name
   webAppName: "smops-app-2026"
 
-  # Full ACR hostname
+  # Full ACR hostname (derived)
   containerRegistry: "smops2026.azurecr.io"
 
-  # Image tag – use the build number for traceability
+  # Image tag – build number ensures traceability
   imageTag: "$(Build.BuildNumber)"
 
   # Node.js version
@@ -56,6 +59,9 @@ variables:
   # Working directories
   backendDir:  "$(System.DefaultWorkingDirectory)/backend"
   frontendDir: "$(System.DefaultWorkingDirectory)/frontend"
+
+  # Root of the repo (Dockerfile lives here and references both dirs)
+  rootDir: "$(System.DefaultWorkingDirectory)"
 
 # ════════════════════════════════════════════════════════════════
 # STAGE 1 – Install Dependencies
@@ -90,7 +96,6 @@ stages:
             workingDirectory: $(frontendDir)
             displayName: "npm ci – Frontend"
 
-          # Cache node_modules for downstream stages
           - task: Cache@2
             displayName: "Cache backend node_modules"
             inputs:
@@ -173,64 +178,53 @@ stages:
             workingDirectory: $(frontendDir)
             displayName: "vite build"
             env:
-              VITE_API_URL: "/api"
+              # Empty → API calls go to same origin as the page
+              VITE_API_URL: ""
 
-          # Publish the dist/ folder as a pipeline artifact for the Docker stage
+          - script: |
+              echo "── Frontend build output ──────────────────────"
+              du -sh $(frontendDir)/dist
+              ls $(frontendDir)/dist
+            displayName: "Inspect build output"
+
+          # Publish dist/ as artifact (used for verification; Docker build
+          # pulls it directly from the source tree via multi-stage Dockerfile)
           - task: PublishBuildArtifacts@1
-            displayName: "Publish frontend build artifact"
+            displayName: "Publish frontend dist artifact"
             inputs:
               pathToPublish: "$(frontendDir)/dist"
               artifactName:  "frontend-dist"
               publishLocation: Container
 
 # ════════════════════════════════════════════════════════════════
-# STAGE 4 – Build Docker Images
+# STAGE 4 – Build Single Docker Image
 # ════════════════════════════════════════════════════════════════
   - stage: DockerBuild
-    displayName: "Stage 4 – Build Docker Images"
+    displayName: "Stage 4 – Build Docker Image"
     dependsOn: Build
     jobs:
-      - job: BuildDockerImages
-        displayName: "Build Backend & Frontend Docker Images"
+      - job: BuildImage
+        displayName: "Build Combined App Image"
         pool:
           vmImage: ubuntu-latest
         steps:
-          - task: DownloadBuildArtifacts@0
-            displayName: "Download frontend artifact"
-            inputs:
-              buildType:     current
-              artifactName:  frontend-dist
-              downloadPath:  "$(frontendDir)/dist"
-
-          # Build backend image
+          # The Dockerfile lives in backend/ but its build context is the
+          # repo root so it can COPY from both backend/ and frontend/
           - task: Docker@2
-            displayName: "docker build – backend"
+            displayName: "docker build – combined image"
             inputs:
-              command:             build
-              dockerfile:          "$(backendDir)/Dockerfile"
-              buildContext:        "$(backendDir)"
-              repository:          "$(imageRepository.backend)"
-              tags:                |
+              command:      build
+              dockerfile:   "$(backendDir)/Dockerfile"
+              buildContext: "$(rootDir)"
+              repository:   "$(imageRepository)"
+              tags: |
                 $(imageTag)
                 latest
-
-          # Build frontend image
-          - task: Docker@2
-            displayName: "docker build – frontend"
-            inputs:
-              command:             build
-              dockerfile:          "$(frontendDir)/Dockerfile"
-              buildContext:        "$(frontendDir)"
-              repository:          "$(imageRepository.frontend)"
-              tags:                |
-                $(imageTag)
-                latest
-              arguments:           "--build-arg VITE_API_URL=/api"
 
           - script: |
-              echo "Built images:"
-              docker images | grep -E "sms-backend|sms-frontend"
-            displayName: "List built images"
+              echo "Built image: $(imageRepository):$(imageTag)"
+              docker images $(imageRepository)
+            displayName: "Inspect built image"
 
 # ════════════════════════════════════════════════════════════════
 # STAGE 5 – Push to Azure Container Registry
@@ -240,50 +234,28 @@ stages:
     dependsOn: DockerBuild
     condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     jobs:
-      - job: PushImages
-        displayName: "Push Images to ACR"
+      - job: PushImage
+        displayName: "Push Combined Image to ACR"
         pool:
           vmImage: ubuntu-latest
         steps:
-          # Login to ACR
           - task: Docker@2
-            displayName: "Login to ACR"
+            displayName: "Build & Push to ACR"
             inputs:
-              command:             login
-              containerRegistry:   $(dockerRegistryServiceConnection)
-
-          # Build & push backend
-          - task: Docker@2
-            displayName: "Build & Push backend image"
-            inputs:
-              command:             buildAndPush
-              dockerfile:          "$(backendDir)/Dockerfile"
-              buildContext:        "$(backendDir)"
-              containerRegistry:   $(dockerRegistryServiceConnection)
-              repository:          "$(imageRepository.backend)"
-              tags:                |
+              command:           buildAndPush
+              dockerfile:        "$(backendDir)/Dockerfile"
+              buildContext:      "$(rootDir)"
+              containerRegistry: $(dockerRegistryServiceConnection)
+              repository:        "$(imageRepository)"
+              tags: |
                 $(imageTag)
                 latest
-
-          # Build & push frontend
-          - task: Docker@2
-            displayName: "Build & Push frontend image"
-            inputs:
-              command:             buildAndPush
-              dockerfile:          "$(frontendDir)/Dockerfile"
-              buildContext:        "$(frontendDir)"
-              containerRegistry:   $(dockerRegistryServiceConnection)
-              repository:          "$(imageRepository.frontend)"
-              tags:                |
-                $(imageTag)
-                latest
-              arguments:           "--build-arg VITE_API_URL=/api"
 
           - script: |
-              echo "✅ Images pushed to ACR: $(containerRegistry)"
-              echo "   Backend:  $(containerRegistry)/$(imageRepository.backend):$(imageTag)"
-              echo "   Frontend: $(containerRegistry)/$(imageRepository.frontend):$(imageTag)"
-            displayName: "Log pushed image URIs"
+              echo "✅ Pushed to ACR"
+              echo "   Image: $(containerRegistry)/$(imageRepository):$(imageTag)"
+              echo "   Also tagged: $(containerRegistry)/$(imageRepository):latest"
+            displayName: "Log pushed image URI"
 
 # ════════════════════════════════════════════════════════════════
 # STAGE 6 – Deploy to Azure App Service
@@ -294,7 +266,7 @@ stages:
     condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     jobs:
       - deployment: DeployToAppService
-        displayName: "Deploy Backend to Azure App Service"
+        displayName: "Deploy Combined Container"
         pool:
           vmImage: ubuntu-latest
         environment: "production"
@@ -303,16 +275,20 @@ stages:
             deploy:
               steps:
                 - task: AzureWebAppContainer@1
-                  displayName: "Deploy backend container to App Service"
+                  displayName: "Deploy container to App Service"
                   inputs:
                     azureSubscription: $(azureSubscription)
                     appName:           $(webAppName)
-                    containers:        "$(containerRegistry)/$(imageRepository.backend):$(imageTag)"
-                    appSettings:       '-NODE_ENV production -PORT 3000 -LOG_LEVEL info -CORS_ORIGIN https://$(webAppName).azurewebsites.net'
+                    containers:        "$(containerRegistry)/$(imageRepository):$(imageTag)"
+                    appSettings: >
+                      -NODE_ENV production
+                      -PORT 3000
+                      -LOG_LEVEL info
+                      -WEBSITES_PORT 3000
 
                 - script: |
-                    echo "🚀 Deployment triggered for $(webAppName)"
-                    echo "   Image: $(containerRegistry)/$(imageRepository.backend):$(imageTag)"
+                    echo "🚀 Deployed: $(containerRegistry)/$(imageRepository):$(imageTag)"
+                    echo "   URL: https://$(webAppName).azurewebsites.net"
                   displayName: "Log deployment info"
 
 # ════════════════════════════════════════════════════════════════
@@ -332,19 +308,19 @@ stages:
               chmod +x $(System.DefaultWorkingDirectory)/scripts/verify-deployment.sh
               $(System.DefaultWorkingDirectory)/scripts/verify-deployment.sh \
                 "https://$(webAppName).azurewebsites.net/health"
-            displayName: "Run deployment verification script"
+            displayName: "Poll /health until UP"
             env:
               WEB_APP_NAME: $(webAppName)
 
           - script: |
               echo ""
-              echo "═══════════════════════════════════════════════"
-              echo "  ✅ DEPLOYMENT SUCCESSFUL"
-              echo "═══════════════════════════════════════════════"
-              echo "  App URL  : https://$(webAppName).azurewebsites.net"
-              echo "  Health   : https://$(webAppName).azurewebsites.net/health"
+              echo "═══════════════════════════════════════════════════"
+              echo "  ✅  DEPLOYMENT SUCCESSFUL"
+              echo "═══════════════════════════════════════════════════"
+              echo "  Frontend : https://$(webAppName).azurewebsites.net"
               echo "  API      : https://$(webAppName).azurewebsites.net/api/students"
+              echo "  Health   : https://$(webAppName).azurewebsites.net/health"
               echo "  Build    : $(Build.BuildNumber)"
-              echo "  Image    : $(containerRegistry)/$(imageRepository.backend):$(imageTag)"
-              echo "═══════════════════════════════════════════════"
+              echo "  Image    : $(containerRegistry)/$(imageRepository):$(imageTag)"
+              echo "═══════════════════════════════════════════════════"
             displayName: "Deployment summary"

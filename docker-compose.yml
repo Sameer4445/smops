@@ -1,64 +1,44 @@
 # ════════════════════════════════════════════════════════════════
-# Student Management System – Docker Compose
-# Starts both frontend (Nginx/React) and backend (Node/Express)
+# Student Management System – Docker Compose (single container)
+#
+# One container serves everything:
+#   http://localhost:3000/          → React frontend
+#   http://localhost:3000/api/*     → Express REST API
+#   http://localhost:3000/health    → Health check
+#
+# The Dockerfile build context is the repo root so it can copy
+# from both backend/ and frontend/ in a multi-stage build.
 # ════════════════════════════════════════════════════════════════
 
 version: "3.9"
 
 services:
-  # ── Backend API ──────────────────────────────────────────────
-  backend:
+  app:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: sms-backend
+      context: .                    # repo root – required for multi-stage copy
+      dockerfile: backend/Dockerfile
+    container_name: sms-app
     restart: unless-stopped
     environment:
-      NODE_ENV:    production
-      PORT:        3000
-      CORS_ORIGIN: http://localhost:5173
-      LOG_LEVEL:   info
+      NODE_ENV:  production
+      PORT:      3000
+      LOG_LEVEL: info
     ports:
       - "3000:3000"
     volumes:
-      # Persist SQLite database between restarts
+      # Persist SQLite database between container restarts
       - sqlite_data:/app/database/data
-      - backend_logs:/app/logs
+      - app_logs:/app/logs
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
       interval: 30s
       timeout:  10s
       retries:  3
-      start_period: 20s
-    networks:
-      - sms_net
+      start_period: 30s
 
-  # ── Frontend ─────────────────────────────────────────────────
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        # Tell Vite where the API lives at build time
-        VITE_API_URL: /api
-    container_name: sms-frontend
-    restart: unless-stopped
-    ports:
-      - "5173:5173"
-    depends_on:
-      backend:
-        condition: service_healthy
-    networks:
-      - sms_net
-
-# ── Volumes ────────────────────────────────────────────────────
+# ── Volumes ─────────────────────────────────────────────────────
 volumes:
   sqlite_data:
     driver: local
-  backend_logs:
+  app_logs:
     driver: local
-
-# ── Networks ───────────────────────────────────────────────────
-networks:
-  sms_net:
-    driver: bridge

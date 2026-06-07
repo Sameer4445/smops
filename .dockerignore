@@ -1,0 +1,62 @@
+# ════════════════════════════════════════════════════════════════
+# .dockerignore – repo root
+# Prevents host machine files from leaking into the Docker build
+# context, keeping the image clean and build fast.
+# ════════════════════════════════════════════════════════════════
+
+# ── Node modules (CRITICAL) ──────────────────────────────────
+# The Dockerfile runs npm ci inside the container.
+# Host node_modules must NEVER be copied in – they contain
+# platform-specific native binaries (sqlite3 .node files built
+# for macOS/Windows) that will crash on Linux Alpine.
+backend/node_modules
+frontend/node_modules
+node_modules
+
+# ── Build outputs ────────────────────────────────────────────
+# The Dockerfile builds the frontend from source inside the
+# container. Pre-built dist/ from the host is not needed and
+# could shadow a fresh build.
+frontend/dist
+backend/public
+
+# ── SQLite runtime data ──────────────────────────────────────
+# Never bake a database file into the image.
+# Data is persisted via Docker volume at runtime.
+backend/database/data
+*.db
+*.db-shm
+*.db-wal
+
+# ── Logs ─────────────────────────────────────────────────────
+backend/logs
+logs
+*.log
+
+# ── Git ──────────────────────────────────────────────────────
+.git
+.gitignore
+
+# ── Environment files ────────────────────────────────────────
+# Secrets must never be baked into the image.
+.env
+.env.*
+backend/.env
+frontend/.env
+frontend/src/.env
+
+# ── IDE / OS ─────────────────────────────────────────────────
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# ── Docker files (not needed inside the image) ───────────────
+docker-compose.yml
+docker-compose.override.yml
+
+# ── CI/CD & docs ─────────────────────────────────────────────
+azure-pipelines.yml
+scripts
+docs
+*.md
