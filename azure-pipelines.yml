@@ -7,6 +7,10 @@
 #   /api/*     → Express REST API
 #   /health    → Health check
 #
+# Service connections required in Azure DevOps:
+#   acr-service-connection      → Docker Registry type (ACR)
+#   azure-subscription-connection → Azure Resource Manager type
+#
 # Pipeline Stages:
 #   1. install      – Install backend & frontend dependencies
 #   2. lint         – Lint frontend & backend code
@@ -40,17 +44,21 @@ variables:
   # Single combined image repository name
   imageRepository: "sms-app"
 
-  # Service connections configured in Azure DevOps
-  dockerRegistryServiceConnection: "azure-subscription-connection"
+  # Docker Registry service connection (type: dockerregistry → ACR)
+  # Used by ALL Docker@2 tasks for login, build, and push
+  dockerRegistryServiceConnection: "acr-service-connection"
+
+  # Azure Resource Manager service connection (type: azurerm)
+  # Used ONLY by AzureWebAppContainer@1 deploy task
   azureSubscription: "azure-subscription-connection"
 
   # Azure App Service name
   webAppName: "smops-app-2026"
 
-  # Full ACR hostname (derived)
+  # Full ACR hostname (derived from acrName)
   containerRegistry: "smops2026.azurecr.io"
 
-  # Image tag – build number ensures traceability
+  # Image tag – build number ensures every build is traceable
   imageTag: "$(Build.BuildNumber)"
 
   # Node.js version
@@ -60,7 +68,8 @@ variables:
   backendDir:  "$(System.DefaultWorkingDirectory)/backend"
   frontendDir: "$(System.DefaultWorkingDirectory)/frontend"
 
-  # Root of the repo (Dockerfile lives here and references both dirs)
+  # Repo root – Dockerfile build context must be here so it can
+  # COPY from both backend/ and frontend/ in multi-stage build
   rootDir: "$(System.DefaultWorkingDirectory)"
 
 # ════════════════════════════════════════════════════════════════
@@ -178,7 +187,7 @@ stages:
             workingDirectory: $(frontendDir)
             displayName: "vite build"
             env:
-              # Empty → API calls go to same origin as the page
+              # Empty – API calls go to same origin as the page (single container)
               VITE_API_URL: ""
 
           - script: |
@@ -187,8 +196,6 @@ stages:
               ls $(frontendDir)/dist
             displayName: "Inspect build output"
 
-          # Publish dist/ as artifact (used for verification; Docker build
-          # pulls it directly from the source tree via multi-stage Dockerfile)
           - task: PublishBuildArtifacts@1
             displayName: "Publish frontend dist artifact"
             inputs:
@@ -208,22 +215,23 @@ stages:
         pool:
           vmImage: ubuntu-latest
         steps:
-          # The Dockerfile lives in backend/ but its build context is the
-          # repo root so it can COPY from both backend/ and frontend/
+          # Build context = repo root so Dockerfile can COPY from
+          # both backend/ and frontend/ directories
           - task: Docker@2
-            displayName: "docker build – combined image"
+            displayName: "docker build – sms-app"
             inputs:
-              command:      build
-              dockerfile:   "$(backendDir)/Dockerfile"
-              buildContext: "$(rootDir)"
-              repository:   "$(imageRepository)"
+              command:           build
+              dockerfile:        "$(backendDir)/Dockerfile"
+              buildContext:      "$(rootDir)"
+              containerRegistry: $(dockerRegistryServiceConnection)
+              repository:        "$(imageRepository)"
               tags: |
                 $(imageTag)
                 latest
 
           - script: |
-              echo "Built image: $(imageRepository):$(imageTag)"
-              docker images $(imageRepository)
+              echo "Built image: $(containerRegistry)/$(imageRepository):$(imageTag)"
+              docker images | grep sms-app
             displayName: "Inspect built image"
 
 # ════════════════════════════════════════════════════════════════
@@ -235,12 +243,15 @@ stages:
     condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     jobs:
       - job: PushImage
-        displayName: "Push Combined Image to ACR"
+        displayName: "Push sms-app Image to ACR"
         pool:
           vmImage: ubuntu-latest
         steps:
+          # buildAndPush logs in, builds, and pushes in one step.
+          # containerRegistry MUST reference a dockerregistry service
+          # connection – NOT an azurerm connection.
           - task: Docker@2
-            displayName: "Build & Push to ACR"
+            displayName: "Build & Push smops2026.azurecr.io/sms-app"
             inputs:
               command:           buildAndPush
               dockerfile:        "$(backendDir)/Dockerfile"
@@ -252,10 +263,10 @@ stages:
                 latest
 
           - script: |
-              echo "✅ Pushed to ACR"
-              echo "   Image: $(containerRegistry)/$(imageRepository):$(imageTag)"
-              echo "   Also tagged: $(containerRegistry)/$(imageRepository):latest"
-            displayName: "Log pushed image URI"
+              echo "✅ Pushed successfully"
+              echo "   $(containerRegistry)/$(imageRepository):$(imageTag)"
+              echo "   $(containerRegistry)/$(imageRepository):latest"
+            displayName: "Log pushed image URIs"
 
 # ════════════════════════════════════════════════════════════════
 # STAGE 6 – Deploy to Azure App Service
@@ -266,7 +277,7 @@ stages:
     condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     jobs:
       - deployment: DeployToAppService
-        displayName: "Deploy Combined Container"
+        displayName: "Deploy sms-app to smops-app-2026"
         pool:
           vmImage: ubuntu-latest
         environment: "production"
@@ -274,6 +285,8 @@ stages:
           runOnce:
             deploy:
               steps:
+                # azureSubscription uses the Azure RM service connection.
+                # This is separate from the Docker registry connection.
                 - task: AzureWebAppContainer@1
                   displayName: "Deploy container to App Service"
                   inputs:
